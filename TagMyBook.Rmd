@@ -1,0 +1,445 @@
+---
+title: "TagMyBook"
+author: "Trevor Rizzi"
+date: "2022-11-21"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+install.packages("tidytext")
+
+library(tidyverse)
+library(lubridate)
+library(tidymodels)
+library(patchwork)
+library(janitor)
+library(tidytext)
+library(parsnip)
+
+
+tagMyBook <- read.csv("/Users/trevorrizz/Documents/Pstat131-FinalProj/data.csv")
+
+tagMyBook <- read.csv("/Users/trevorrizz/Documents/Pstat131-FinalProj/dataTWO.csv")
+
+tagMyBook <- tagMyBook %>%
+  clean_names() %>% 
+  mutate_at(vars(genre), as.factor)
+set.seed(9388)
+
+
+```
+## Data Cleaning
+
+```{r}
+head(tagMyBook)
+
+#Dropping the index column since we do not need it
+#Since we are only using the synopsis column to predict a book's genre we can
+# get rid of a few of the other unnecessary columns.
+# We will keep the book title and author name simply for readability.
+# It may be interesting to use the title name as a predictor as well???
+tagMyBook <- tagMyBook %>%
+  select(-x, -rating, -num_ratings, -num_followers, -num_reviews)
+
+
+```
+We now have 1,539 book entries and 4 columns.
+This data is already extrememly clean so we need not do much more
+
+```{r}
+length(unique(tagMyBook$genre)) ## WE have 10 different genres
+length(unique(tagMyBook$title))  # we have 1539 unique books
+
+table(tagMyBook$genre) ## Shows how many of each genre we have.
+str(tagMyBook)
+```
+Note that fantasy and thriller have much higher entries than the rest, and science_fiction does not have many entries and thus the model will likely not predict them well
+
+
+```{r}
+
+tagMyBook <- tagMyBook %>%
+  unnest_tokens(word, synopsis) %>%
+  filter(!grepl('[0-9]', word)) ## gets rid of numbers - also it reduced entry count by around half -- verify this later
+
+```
+
+```{r}
+
+tagMyBook %>%
+  count(word, sort = T) # checking word count before removing STOP WORDS
+
+library(stopwords) ## Removing stop words
+tagMyBook1 <- tagMyBook %>%
+  filter(!(word %in% stopwords(source = "snowball")))
+
+
+
+```
+EXPLAIN HERE WHY WE ARE REMOVING STOP WORDS 
+
+
+
+LETS DO THE DATA SPLIT HERE BUT REMEMBER WE DONT WANT TO SPLIT UP ENTIRE BOOKS OR DO WE? I THINK IT IS OKAY IF WE DO. WE DO, can sort by title later on.
+
+```{r}
+tagMyBook_split <- tagMyBook1 %>%
+  initial_split(prop = .80, strata = genre)
+
+tagMyBook_test <- testing(tagMyBook_split)
+
+tagMyBook_train <- training(tagMyBook_split)
+
+tagMyBook_fold <- vfold_cv(tagMyBook_train, v = 5, strata = genre)
+
+
+```
+
+
+
+NOW WE DO LOTS OF EXPLORATORY DATA ANALYSIS BECAUSE CLEANING WAS SO SHORT
+```{r}
+ggplot(tagMyBook_train, aes(genre)) + geom_bar() + 
+  labs(
+    title = "Genre Matched with Word count",
+    x = "Genre",
+    y = "Count of Individual Words"
+  
+)
+
+
+```
+This is an interesting chart from the get go, because of the nature of our tokenized data set, each word in a book's synopsis gets it's own entry in the data set. This is preferred because ultimately we are training the model based on individual word connotation and not their meaning in context which would be much more involved.
+
+OKAY THIS MIGHT BE SUBJECT TO CHANGE BECAUSE WE NEED TO KEEP A MEMORY OF WORDS THAT HAVE COME BEFORE ! THE CONTEXT IS IMPORTANT
+
+```{r}
+tagMyBook_train %>%
+  count(word, sort = TRUE)
+# Gets the top words. Less is very interesting to me as the second top ?? 
+##LETS VISUALIZE THIS YEAAAA
+```
+
+
+SENTIMENT ANALYSIS?:? FUCK EYAH
+```{r}
+positive <- get_sentiments("bing") %>%
+  filter(sentiment == "positive")
+
+## Just lists the count of all positive sentiment words
+tagMyBook_train %>%
+  semi_join(positive) %>% 
+  count(word, sort = TRUE)
+
+
+
+## Can plot the change of sentiment among genres
+bing <- get_sentiments("bing")
+
+genresentiment <- tagMyBook_train %>%
+  inner_join(bing) %>%
+  count(genre, sentiment) %>%
+  spread(sentiment, n, fill = 0) %>%
+  mutate(sentiment = positive - negative)
+
+ggplot(genresentiment, aes( genre, sentiment)) +
+  geom_bar(stat = "identity", show.legend = FALSE)
+
+
+
+```
+WOW THATS A LOT OF NEGATIVE WORDS
+
+
+```{r}
+bing_sentiment_count <- tagMyBook_train %>%
+  inner_join(bing) %>%
+  count(word, sentiment, sort = TRUE)
+
+## THIS WAS STRAIGHT COPIED YO
+bing_sentiment_count %>%
+  filter(n > 63) %>%
+  mutate(n = ifelse(sentiment == "negative", -n, n)) %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(word, n, fill = sentiment)) +
+  geom_col() +
+  coord_flip() +
+  labs(y = "Contribution to sentiment")
+
+
+##################### when i split this the name counts "p" as a word. Maybe I should get rid of names?
+tagMyBook %>%
+  filter(title == "Team of Rivals: The Political Genius of Abraham Lincoln") %>%
+  print()
+
+#######################3333333
+```
+Checking this is important as sometimes the context could be wrong and we could then add that word to a custom stop_word list
+Also gives us a nice little summary of the top words used in this dataset
+
+```{r}
+
+## Lets look at the sentiment of entire synopsis now yeah?
+
+bingnegative <- get_sentiments("bing") %>%
+  filter(sentiment == "negative")
+
+bingpositive <- get_sentiments("bing") %>%
+  filter(sentiment == "positive")
+
+
+wordcounts <- tagMyBook_train %>%
+  group_by(title) %>%
+  summarize(words = n())
+
+negative_synopses<-tagMyBook_train %>%
+  semi_join(bingnegative) %>%
+  group_by(title) %>%
+  summarize(negativewords = n()) %>%
+  left_join(wordcounts, by = c("title")) %>%
+  mutate(ratio = negativewords/words) 
+
+positive_synopses<-tagMyBook_train %>%
+  semi_join(bingpositive) %>%
+  group_by(title) %>%
+  summarize(positivewords = n()) %>%
+  left_join(wordcounts, by = "title") %>%
+  mutate(ratio = positivewords/words)
+
+
+```
+
+
+```{r}
+
+# a plot of the frequency of top words in each genre sounds yummers CMD SHIFT M
+
+tagMyBook_train %>%
+  count(word, genre) %>%
+  filter(n >= 3) %>%  ## SHOULD PROBABLY INCLUDE THIS EVERYWHERE !
+  bind_tf_idf(word, genre, n) %>% 
+  group_by(genre) %>% 
+  top_n(tf_idf,n = 5) %>% 
+  ungroup() %>% 
+  ggplot(aes(x = reorder_within(word, tf_idf, genre), y = tf_idf, fill = genre)) + geom_col() + scale_x_reordered() + coord_flip() + facet_wrap(~genre, scales = "free") + theme(legend.position = "none")
+
+
+tagMyBook_train %>% 
+  filter(word== "magical") %>% 
+  count(word)
+
+
+```
+
+not sure why i hsave this but the rubric said to use pca for model but this isnt fir model
+```{r, fig.height = 15, fig.width = 15}
+sparse_df <- tagMyBook %>% 
+  select(genre, synopsis) %>% 
+  unnest_tokens("word", "synopsis") %>% 
+  count(genre, word) %>% 
+  anti_join(stop_words) %>% 
+  filter(n>=3) %>% 
+  cast_sparse(row = genre, column = word, value = n)
+
+library(irlba)
+pca_text <- prcomp_irlba(sparse_df, n=4, scale = TRUE)
+
+pca_text$center %>% 
+  tidy() %>% 
+  select(names) %>% 
+  cbind(pca_text$rotation) %>% 
+  ggplot(aes(x = PC1, y = PC2, label = names)) + geom_point() + geom_text()
+```
+
+
+
+```{r}
+## Lets create our recipe here
+# Wondering if we should go back and change the EDA to on the entire set or just the split
+# ALso might want to modify the original dataset a little more before the split.
+# Also on the video I don't think his testing set has the unnest tokens?
+
+
+library(textrecipes)
+
+#############NAIVE BAYES WHICHIS WORKING YO
+complaints_rec <- recipe(genre~summary, data = tagMyBook_train) %>%
+  step_tokenize(summary) %>%
+  step_tokenfilter(summary, max_tokens = 1e3) %>%
+  step_tfidf(summary) %>% 
+  step_downsample(genre)
+
+complaint_wf <- workflow() %>%
+  add_recipe(complaints_rec)
+
+library(discrim)
+nb_spec <- naive_Bayes() %>%
+  set_mode("classification") %>%
+  set_engine("naivebayes")
+
+nb_fit <- complaint_wf %>%
+  add_model(nb_spec) %>%
+  fit(data = tagMyBook_train)
+
+
+
+nb_wf <- workflow() %>%
+  add_recipe(complaints_rec) %>%
+  add_model(nb_spec)
+
+crossValidation <- vfold_cv(tagMyBook_train, v = 10, strata = genre) # CHANGE THAT REPEAT BISH
+
+
+nb_rs <- fit_resamples(
+  nb_wf,
+  crossValidation,
+  control = control_resamples(save_pred = TRUE)
+)
+
+
+nb_rs_metrics <- collect_metrics(nb_rs)
+nb_rs_predictions <- collect_predictions(nb_rs)
+
+
+nb_rs_predictions %>%
+  group_by(id) %>%
+  roc_curve(truth = genre, estimate = c(.pred_crime, .pred_fantasy, .pred_history, .pred_horror, .pred_psychology, .pred_romance, .pred_science, .pred_sports, .pred_thriller, .pred_travel)) %>%
+  autoplot() +
+  labs(
+    color = NULL,
+    title = "ROC curve for US Consumer Finance Complaints",
+    subtitle = "Each resample fold is shown in a different color"
+  )
+#####################################
+
+```
+Clearly the model doesnt even make predictions for the minority genres, and we should probably do something about that or talk about it more and continue
+
+
+Maybe we can do some downsampling !!!!!!! 
+
+```{r}
+
+#################YEWWWW LASSO BABAAAY
+
+library(themis)
+
+lasso_rec <-
+  recipe(genre ~ summary,
+         data = tagMyBook_train) %>%
+  step_tokenize(summary) %>%
+  step_tokenfilter(summary, max_tokens = 1e3) %>%
+  step_tfidf(summary) %>%
+  step_downsample(genre)
+
+
+lasso_folds <- vfold_cv(tagMyBook_train, v = 10, strata = genre)
+
+lasso_spec <- multinom_reg(penalty = tune(), mixture = 1) %>%
+  set_mode("classification") %>%
+  set_engine("glmnet")
+
+
+lasso_spec
+
+library(hardhat)
+sparse_bp <- default_recipe_blueprint(composition = "dgCMatrix")
+
+lasso_wf <- workflow() %>%
+  add_recipe(lasso_rec, blueprint = sparse_bp) %>%
+  add_model(lasso_spec)
+
+lasso_wf
+
+smaller_lambda <- grid_regular(penalty(range = c(-5, 0)), levels = 20)
+
+lasso_rs <- tune_grid(
+  lasso_wf,
+  lasso_folds,
+  grid = smaller_lambda,
+  control = control_resamples(save_pred = TRUE)
+)
+
+best_acc <- lasso_rs %>%
+  show_best("accuracy")
+
+best_acc
+
+lasso_rs %>%
+  collect_predictions() %>%
+  filter(penalty == best_acc$penalty) %>%
+  filter(id == "Fold01") %>%
+  conf_mat(genre, .pred_class) %>%
+  autoplot(type = "heatmap") +
+  scale_y_discrete(labels = function(x) str_wrap(x, 20)) +
+  scale_x_discrete(labels = function(x) str_wrap(x, 20))
+
+## THIS ISNT DOING JUST THE TOP ONE HUH
+lasso_metrics <- collect_metrics(lasso_rs)
+lasso_predictions <- collect_predictions(lasso_rs)
+lasso_predictions %>%
+  group_by(id) %>%
+  roc_curve(truth = genre, estimate = c(.pred_crime, .pred_fantasy, .pred_history, .pred_horror, .pred_psychology, .pred_romance, .pred_science, .pred_sports, .pred_thriller, .pred_travel)) %>%
+  autoplot() +
+  labs(
+    color = NULL,
+    title = "ROC curve for US Consumer Finance Complaints",
+    subtitle = "Each resample fold is shown in a different color"
+  )
+
+```
+
+
+```{r}
+
+
+rf_rec <-
+  recipe(genre ~ summary,
+         data = tagMyBook_train) %>%
+  step_tokenize(summary) %>%
+  step_tokenfilter(summary, max_tokens = 1e3) %>%
+  step_tfidf(summary) %>%
+  step_downsample(genre)
+
+
+
+rf_spec <- rand_forest(mtry = tune(), trees = tune(), min_n = tune()) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("classification")
+
+rf_wf <- workflow() %>%
+  add_model(rf_spec) %>%
+  add_recipe(rf_rec)
+
+param_grid <- grid_regular(mtry(range = c(1, 1)),trees(range = c(3, 6)), min_n(range = c(3, 6)),  levels = 8)
+
+rf_rs <- tune_grid(
+  rf_wf, 
+  resamples = crossValidation, 
+  grid = param_grid,
+  metrics = metric_set(roc_auc),
+  control = control_resamples(save_pred = TRUE)
+)
+
+
+autoplot(rf_rs)
+
+rf_metrics <- collect_metrics(rf_rs)
+rf_predictions <- collect_predictions(rf_rs)
+rf__predictions %>%
+  group_by(id) %>%
+  roc_curve(truth = genre, estimate = c(.pred_crime, .pred_fantasy, .pred_history, .pred_horror, .pred_psychology, .pred_romance, .pred_science, .pred_sports, .pred_thriller, .pred_travel)) %>%
+  autoplot() +
+  labs(
+    color = NULL,
+    title = "ROC curve for US Consumer Finance Complaints",
+    subtitle = "Each resample fold is shown in a different color"
+  )
+
+```
+
